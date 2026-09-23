@@ -1,0 +1,6 @@
+export default {
+  plugins: {
+    '@tailwindcss/postcss': {}, // 變更為新版的套件名稱
+    autoprefixer: {},
+  },
+}

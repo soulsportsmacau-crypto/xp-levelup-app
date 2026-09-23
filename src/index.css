@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* 確保自訂的浮動動畫依然有效 */
+@keyframes floatUp {
+  0% { opacity: 1; transform: translate(-50%, 0) scale(0.8); }
+  50% { opacity: 1; transform: translate(-50%, -35px) scale(1.3); }
+  100% { opacity: 0; transform: translate(-50%, -70px) scale(1); }
+}
+.particle-anim {
+  animation: floatUp 1.1s cubic-bezier(0.18, 0.89, 0.32, 1.28) forwards;
+  pointer-events: none;
+}
