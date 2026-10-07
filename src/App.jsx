@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, collection, onSnapshot, doc, setDoc, writeBatch } from "firebase/firestore";
+import { getFirestore, collection, onSnapshot, doc, setDoc, writeBatch, query, where } from "firebase/firestore";
 import xpIcon from "./assets/xp-icon.png";
 
 // ==========================================
@@ -230,21 +230,29 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. 實時連線監聽 Firestore /students 及 /teachers
+  // 2. 實時連線監聽 Firestore /students (精準篩選班級) 及 /teachers
   useEffect(() => {
     if (!dbUser) return;
 
-    const studentsRef = collection(db, 'students');
-    const unsubscribeStudents = onSnapshot(studentsRef, (snapshot) => {
+    // ⚡ 核心優化：建立篩選查詢，只撈取 className 等於 selectedClass 的學生
+    const studentsQuery = query(
+      collection(db, 'students'),
+      where('className', '==', String(selectedClass).toUpperCase())
+    );
+
+    const unsubscribeStudents = onSnapshot(studentsQuery, (snapshot) => {
       const loaded = snapshot.docs
         .map(doc => doc.data())
         .filter(doc => doc.id !== "SYSTEM_CONFIG_QUESTS");
+      
+      // 💡 此時 loaded 陣列裡只有該班級的學生，React 狀態會自動更新
       setStudents(loaded);
     }, (error) => {
       console.error("Firestore error (students):", error);
       showToast("⚠️ 無法連線至學生資料庫，請檢查網路。");
     });
 
+    // 🧑‍🏫 保持原有的教師監聽邏輯不變
     const teachersRef = collection(db, 'teachers');
     const unsubscribeTeachers = onSnapshot(teachersRef, (snapshot) => {
       const teachersList = snapshot.docs.map(doc => doc.data());
@@ -269,7 +277,9 @@ export default function App() {
       unsubscribeStudents();
       unsubscribeTeachers();
     };
-  }, [dbUser, currentTeacher?.username]);
+    // ⚡ 注意：這裡必須把 selectedClass 補進相依陣列，當老師換班級時，才會自動重新訂閱新班級的資料！
+  }, [dbUser, currentTeacher?.username, selectedClass]); 
+
 
   // 計算當前登入教師獲授權的班級列表
   const authorizedClasses = useMemo(() => {
