@@ -2,7 +2,9 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getFirestore, collection, onSnapshot, doc, setDoc, writeBatch, query, where } from "firebase/firestore";
-import xpIcon from "./assets/xp-icon.png";
+
+// XP 圖示網址
+const xpIcon = "https://i.postimg.cc/D0T2gMK3/xp-icon.png";
 
 // ==========================================
 // 聖保祿中學 專屬雲端 Firebase 資料庫 (與主系統 100% 同步)
@@ -45,6 +47,16 @@ const getLvTitle = (level) => {
   if (lv >= 20) return "🏹 白銀戰士";
   if (lv >= 10) return "🛡️ 青銅角鬥士";
   return "🌱 見習鬥士";
+};
+
+// 體適能項目資訊映射表
+const abilityFieldsMap = {
+  cardio: { label: "心肺耐力", icon: "❤️", color: "from-red-500 to-rose-600", textColor: "text-rose-500" },
+  strength: { label: "肌肉力量", icon: "💪", color: "from-blue-500 to-indigo-600", textColor: "text-blue-500" },
+  power: { label: "瞬發爆發力", icon: "⚡", color: "from-amber-500 to-yellow-600", textColor: "text-amber-500" },
+  speed: { label: "直線速度", icon: "🏃", color: "from-emerald-500 to-teal-600", textColor: "text-emerald-500" },
+  flexibility: { label: "關節柔軟度", icon: "🦴", color: "from-pink-500 to-rose-500", textColor: "text-pink-500" },
+  agility: { label: "動態敏捷性", icon: "🔁", color: "from-purple-500 to-violet-600", textColor: "text-purple-500" },
 };
 
 // Web Audio API 音效產生器 (無須外置檔，極速回應)
@@ -121,6 +133,12 @@ export default function App() {
   const [batchMode, setBatchMode] = useState(false);
   const [selectedStudentKeys, setSelectedStudentKeys] = useState({});
 
+  // 🧩 體適能弱項針對分組 Modal 狀態
+  const [groupingModalOpen, setGroupingModalOpen] = useState(false);
+  const [selectedFocusFields, setSelectedFocusFields] = useState(["cardio"]); // 最多選擇 3 個項目
+  const [groupingStrategy, setGroupingStrategy] = useState("weakness_station"); // "weakness_station" (專向弱項) | "balanced_mentor" (強弱互補)
+  const [generatedGroups, setGeneratedGroups] = useState([]);
+
   // 🏃‍♂️ 體適能測驗獎勵模式狀態
   const [challengeMode, setChallengeMode] = useState(false);
   const [challengeModalOpen, setChallengeModalOpen] = useState(false);
@@ -170,6 +188,155 @@ export default function App() {
     const m = Math.floor(totalSeconds / 60);
     const s = totalSeconds % 60;
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  };
+
+  // 🧩 智能體適能弱項分組邏輯
+  const handleToggleFocusField = (fieldKey) => {
+    if (selectedFocusFields.includes(fieldKey)) {
+      if (selectedFocusFields.length === 1) {
+        showToast("⚠️ 請至少保留 1 個訓練項目！");
+        return;
+      }
+      setSelectedFocusFields(prev => prev.filter(k => k !== fieldKey));
+    } else {
+      if (selectedFocusFields.length >= 3) {
+        showToast("⚠️ 最多只能選擇 3 個專向訓練項目！");
+        return;
+      }
+      setSelectedFocusFields(prev => [...prev, fieldKey]);
+    }
+  };
+
+  const handleGenerateSmartGroups = () => {
+    if (selectedFocusFields.length === 0) {
+      showToast("⚠️ 請至少選擇 1 個訓練項目！");
+      return;
+    }
+    if (currentClassStudents.length === 0) {
+      showToast("⚠️ 當前班級無符合條件的學生數據！");
+      return;
+    }
+
+    if (groupingStrategy === "weakness_station") {
+      // 專向弱項分站：找出學生在選擇的項目中分數最低者，分類至該補底站
+      const groupsObj = {};
+      selectedFocusFields.forEach(fKey => {
+        groupsObj[fKey] = {
+          fieldKey: fKey,
+          title: abilityFieldsMap[fKey]?.label || fKey,
+          icon: abilityFieldsMap[fKey]?.icon || "🎯",
+          students: []
+        };
+      });
+
+      currentClassStudents.forEach(student => {
+        const latestRec = (student.scores && student.scores.length > 0) 
+          ? student.scores[student.scores.length - 1] 
+          : {};
+
+        let minKey = selectedFocusFields[0];
+        let minVal = Number(latestRec[minKey] ?? student[minKey] ?? 60);
+
+        selectedFocusFields.forEach(fKey => {
+          const val = Number(latestRec[fKey] ?? student[fKey] ?? 60);
+          if (val < minVal) {
+            minVal = val;
+            minKey = fKey;
+          }
+        });
+
+        groupsObj[minKey].students.push({
+          ...student,
+          scoreVal: minVal
+        });
+      });
+
+      const groupsArr = Object.values(groupsObj).map(g => ({
+        ...g,
+        students: g.students.sort((a, b) => a.scoreVal - b.scoreVal)
+      }));
+
+      setGeneratedGroups(groupsArr);
+    } else {
+      // 強弱互補分隊模式：按總分數蛇形分組
+      const stationCount = Math.max(2, selectedFocusFields.length);
+      const groupsArr = Array.from({ length: stationCount }, (_, i) => ({
+        fieldKey: `group_${i+1}`,
+        title: `互補小隊 第 ${i + 1} 組`,
+        icon: "🤝",
+        students: []
+      }));
+
+      const scoredStudents = currentClassStudents.map(student => {
+        const latestRec = (student.scores && student.scores.length > 0) 
+          ? student.scores[student.scores.length - 1] 
+          : {};
+        let sum = 0;
+        selectedFocusFields.forEach(fKey => {
+          sum += Number(latestRec[fKey] ?? student[fKey] ?? 60);
+        });
+        return {
+          ...student,
+          focusAvg: Math.round(sum / selectedFocusFields.length)
+        };
+      }).sort((a, b) => b.focusAvg - a.focusAvg);
+
+      scoredStudents.forEach((student, index) => {
+        const round = Math.floor(index / stationCount);
+        const groupIndex = (round % 2 === 0) ? (index % stationCount) : (stationCount - 1 - (index % stationCount));
+        groupsArr[groupIndex].students.push(student);
+      });
+
+      setGeneratedGroups(groupsArr);
+    }
+
+    if (soundEnabled) playXpChime();
+    showToast("🎯 已依據數據在庫中成功進行針對性分組！");
+  };
+
+  // 全組一鍵獎勵加 XP
+  const handleGroupBatchXp = async (groupStudents, amount) => {
+    if (!groupStudents || groupStudents.length === 0) return;
+    if (soundEnabled) playBatchSound();
+
+    try {
+      const batch = writeBatch(db);
+      groupStudents.forEach(s => {
+        const key = `${s.className}_${s.id}`;
+        const currentXp = Number(s.xp) || 0;
+        const newXp = currentXp + amount;
+        const docRef = doc(db, 'students', key);
+        batch.set(docRef, { ...s, xp: newXp }, { merge: true });
+      });
+      await batch.commit();
+      showToast(`⚡ 成功為全組 ${groupStudents.length} 位同學發放 +${amount} XP！`);
+    } catch (err) {
+      console.error("全組加分失敗:", err);
+      showToast(`❌ 發放失敗: ${err.message}`);
+    }
+  };
+
+  // 一鍵複製分組文字名單
+  const handleCopyGroupsToClipboard = () => {
+    if (!generatedGroups || generatedGroups.length === 0) return;
+    let text = `【${selectedClass} 班 - 體適能針對性分組名單】\n`;
+    generatedGroups.forEach(g => {
+      text += `\n${g.icon} ${g.title} (${g.students.length}人):\n`;
+      text += g.students.map(s => `${s.id}號 ${s.name}`).join("、 ");
+      text += "\n";
+    });
+
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    document.body.appendChild(textArea);
+    textArea.select();
+    try {
+      document.execCommand("copy");
+      showToast("📋 分組名單已成功複製到剪貼簿！");
+    } catch (err) {
+      showToast("❌ 複製失敗，請手動選取。");
+    }
+    document.body.removeChild(textArea);
   };
 
   // 啟動專案測驗
@@ -639,6 +806,183 @@ export default function App() {
         </div>
       )}
 
+      {/* 🧩 體適能弱項針對分組 Modal */}
+      {groupingModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-3 sm:p-4">
+          <div className={`border p-5 sm:p-6 rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-y-auto space-y-4 shadow-2xl ${
+            isDarkMode ? "bg-slate-900 border-indigo-500/40 text-white" : "bg-white border-indigo-300 text-slate-900"
+          }`}>
+            <div className={`flex justify-between items-center border-b pb-3 ${isDarkMode ? "border-slate-800" : "border-slate-200"}`}>
+              <div>
+                <h3 className="text-base font-black text-indigo-400 flex items-center gap-2">
+                  🧩 體適能數據弱項針對分組 ({selectedClass} 班)
+                </h3>
+                <p className={`text-[11px] ${isDarkMode ? "text-slate-400" : "text-slate-500"}`}>
+                  自動檢測學生最新六項體適能數據，按其相對弱項精準分站訓練或強弱互補
+                </p>
+              </div>
+              <button onClick={() => setGroupingModalOpen(false)} className="font-bold text-slate-400 hover:text-slate-600 text-lg">✕</button>
+            </div>
+
+            {/* 選擇訓練項目 (最多選 3 項) */}
+            <div className="space-y-2">
+              <div className="flex justify-between items-center text-xs font-bold">
+                <span>1. 選擇今日課堂訓練重點項目 (最多選 3 項)</span>
+                <span className="text-amber-500 font-mono">已選 {selectedFocusFields.length}/3 項</span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {Object.entries(abilityFieldsMap).map(([fKey, info]) => {
+                  const isSelected = selectedFocusFields.includes(fKey);
+                  return (
+                    <button
+                      key={fKey}
+                      type="button"
+                      onClick={() => handleToggleFocusField(fKey)}
+                      className={`p-2.5 rounded-2xl border text-left flex items-center justify-between transition-all ${
+                        isSelected
+                          ? "bg-indigo-600 text-white border-indigo-400 font-black shadow-md scale-[1.02]"
+                          : isDarkMode
+                            ? "bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-800"
+                            : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <span className="text-xs">{info.icon} {info.label}</span>
+                      {isSelected && <span className="text-xs">✓</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 分組模式選擇 */}
+            <div className="space-y-2 pt-1">
+              <span className="text-xs font-bold block">2. 選擇分組策略</span>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setGroupingStrategy("weakness_station")}
+                  className={`p-2.5 rounded-xl border text-left transition-all ${
+                    groupingStrategy === "weakness_station"
+                      ? "bg-purple-600/20 border-purple-500 text-purple-300 font-black"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="font-black">🎯 專向弱項補底站</div>
+                  <div className="text-[10px] opacity-75 mt-0.5">將學生派至選定項目中最弱一項進行站別特訓</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setGroupingStrategy("balanced_mentor")}
+                  className={`p-2.5 rounded-xl border text-left transition-all ${
+                    groupingStrategy === "balanced_mentor"
+                      ? "bg-blue-600/20 border-blue-500 text-blue-300 font-black"
+                      : isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                  }`}
+                >
+                  <div className="font-black">🤝 強弱互補小隊</div>
+                  <div className="text-[10px] opacity-75 mt-0.5">高分學生與低分學生混編，以強帶弱互助練習</div>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center pt-2">
+              <button
+                type="button"
+                onClick={handleGenerateSmartGroups}
+                className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-extrabold text-xs rounded-xl shadow-lg active:scale-95"
+              >
+                🔄 執行數據庫智能分組
+              </button>
+
+              {generatedGroups.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleCopyGroupsToClipboard}
+                  className={`px-3 py-2 border rounded-xl text-xs font-bold transition-all ${
+                    isDarkMode ? "bg-slate-800 border-slate-700 text-slate-300" : "bg-slate-100 border-slate-200 text-slate-700"
+                  }`}
+                >
+                  📋 複製名單文字
+                </button>
+              )}
+            </div>
+
+            {/* 分組結果卡片網格 */}
+            {generatedGroups.length > 0 && (
+              <div className="space-y-3 pt-3 border-t border-slate-800/60">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {generatedGroups.map((group, idx) => (
+                    <div
+                      key={idx}
+                      className={`rounded-2xl border p-3 flex flex-col justify-between ${
+                        isDarkMode ? "bg-slate-950/80 border-slate-800" : "bg-slate-50 border-slate-200"
+                      }`}
+                    >
+                      <div>
+                        <div className="flex justify-between items-center mb-2 pb-1.5 border-b border-slate-800/40">
+                          <h4 className="text-xs font-black text-indigo-400 flex items-center gap-1.5">
+                            <span>{group.icon}</span>
+                            <span>{group.title}</span>
+                            <span className="text-[10px] font-mono text-slate-500 font-normal">({group.students.length}人)</span>
+                          </h4>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleGroupBatchXp(group.students, 50)}
+                              className="px-2 py-0.5 bg-amber-500 text-slate-950 font-black text-[10px] rounded-lg shadow-sm"
+                            >
+                              全組 +50 XP
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleGroupBatchXp(group.students, 100)}
+                              className="px-2 py-0.5 bg-purple-600 text-white font-black text-[10px] rounded-lg shadow-sm"
+                            >
+                              +100
+                            </button>
+                          </div>
+                        </div>
+
+                        {group.students.length > 0 ? (
+                          <div className="grid grid-cols-2 gap-1.5 text-xs">
+                            {group.students.map((s) => (
+                              <div
+                                key={`${s.className}_${s.id}`}
+                                className={`p-1.5 rounded-xl border flex items-center justify-between ${
+                                  isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
+                                }`}
+                              >
+                                <span className="font-bold text-[11px] truncate">
+                                  #{s.id} {s.name}
+                                </span>
+                                {s.scoreVal !== undefined && (
+                                  <span className="text-[10px] font-mono text-rose-400 font-bold">
+                                    {s.scoreVal}分
+                                  </span>
+                                )}
+                                {s.focusAvg !== undefined && (
+                                  <span className="text-[10px] font-mono text-indigo-400 font-bold">
+                                    均{s.focusAvg}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-500 text-center py-3">此項目無分派同學</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 🏃‍♂️ 體適能測驗設定 Modal */}
       {challengeModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4">
@@ -939,6 +1283,23 @@ export default function App() {
             }`}
           >
             <span>🏃‍♂️</span> {challengeMode ? "✕ 退出測驗" : "⏱️ 體適能測驗獎勵"}
+          </button>
+
+          {/* 智能弱項分組 */}
+          <button
+            onClick={() => {
+              setGroupingModalOpen(true);
+              if (generatedGroups.length === 0) {
+                handleGenerateSmartGroups();
+              }
+            }}
+            className={`px-3 py-2 rounded-xl font-extrabold text-xs transition-all border flex items-center gap-1.5 ${
+              isDarkMode 
+                ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-500 hover:from-blue-500 hover:to-indigo-500" 
+                : "bg-indigo-600 text-white border-indigo-500 hover:bg-indigo-700 shadow-sm"
+            }`}
+          >
+            <span>🧩</span> 弱項針對分組
           </button>
 
           {/* 魔法廣播 */}
