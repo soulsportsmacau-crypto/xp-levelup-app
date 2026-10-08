@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, collection, onSnapshot, doc, setDoc, writeBatch, query, where } from "firebase/firestore";
+// ⚡ 修改：引入 initializeFirestore 以開啟快取功能，並引入 getDocs 取代 onSnapshot
+import { 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager,
+  collection, doc, setDoc, writeBatch, query, where, getDocs 
+} from "firebase/firestore";
 
 // XP 圖示網址
 const xpIcon = "https://i.postimg.cc/D0T2gMK3/xp-icon.png";
@@ -21,7 +27,13 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(app);
-const db = getFirestore(app);
+
+// ⚡ 修改：使用高階初始化，開啟強大的本機持久化快取（多頁籤管理）
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager()
+  })
+});
 
 // 班級列表 (全校 36 班)
 const classList = [
@@ -397,56 +409,67 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. 實時連線監聽 Firestore /students (精準篩選班級) 及 /teachers
+     // ========================================================
+  // 🧑‍🏫 優化 1：教師帳號載入 (全堂課只在登入時讀取一次，切換班級不再重複觸發)
+  // ========================================================
   useEffect(() => {
     if (!dbUser) return;
 
-    // ⚡ 核心優化：建立篩選查詢，只撈取 className 等於 selectedClass 的學生
-    const studentsQuery = query(
-      collection(db, 'students'),
-      where('className', '==', String(selectedClass).toUpperCase())
-    );
+    const fetchTeachers = async () => {
+      try {
+        const teachersRef = collection(db, 'teachers');
+        const snapshot = await getDocs(teachersRef);
+        const teachersList = snapshot.docs.map(doc => doc.data());
+        setTeacherAccounts(teachersList);
 
-    const unsubscribeStudents = onSnapshot(studentsQuery, (snapshot) => {
-      const loaded = snapshot.docs
-        .map(doc => doc.data())
-        .filter(doc => doc.id !== "SYSTEM_CONFIG_QUESTS");
-      
-      // 💡 此時 loaded 陣列裡只有該班級的學生，React 狀態會自動更新
-      setStudents(loaded);
-    }, (error) => {
-      console.error("Firestore error (students):", error);
-      showToast("⚠️ 無法連線至學生資料庫，請檢查網路。");
-    });
-
-    // 🧑‍🏫 保持原有的教師監聽邏輯不變
-    const teachersRef = collection(db, 'teachers');
-    const unsubscribeTeachers = onSnapshot(teachersRef, (snapshot) => {
-      const teachersList = snapshot.docs.map(doc => doc.data());
-      setTeacherAccounts(teachersList);
-
-      if (currentTeacher) {
-        const matchingTeacher = teachersList.find(t => 
-          String(t.username || "").trim() === String(currentTeacher.username || "").trim()
-        );
-        if (!matchingTeacher || matchingTeacher.active === false) {
-          setCurrentTeacher(null);
-          showToast("⚠️ 您的教師帳號已被主系統刪除或停用，已自動安全登出。");
-        } else {
-          setCurrentTeacher(matchingTeacher);
+        if (currentTeacher) {
+          const matchingTeacher = teachersList.find(t => 
+            String(t.username || "").trim() === String(currentTeacher.username || "").trim()
+          );
+          if (!matchingTeacher || matchingTeacher.active === false) {
+            setCurrentTeacher(null);
+            showToast("⚠️ 您的教師帳號已被主系統刪除或停用，已自動安全登出。");
+          } else {
+            setCurrentTeacher(matchingTeacher);
+          }
         }
+      } catch (err) {
+        console.error("載入教師資料失敗:", err);
       }
-    }, (error) => {
-      console.error("Firestore error (teachers):", error);
-    });
-
-    return () => {
-      unsubscribeStudents();
-      unsubscribeTeachers();
     };
-    // ⚡ 注意：這裡必須把 selectedClass 補進相依陣列，當老師換班級時，才會自動重新訂閱新班級的資料！
-  }, [dbUser, currentTeacher?.username, selectedClass]); 
 
+    fetchTeachers();
+  }, [dbUser]); 
+
+  // ========================================================
+  // 🏃‍♂️ 優化 2：學生資料載入 (改為 getDocs，優先從本地快取撈取，省電又省錢)
+  // ========================================================
+  useEffect(() => {
+    if (!dbUser) return;
+
+    const fetchStudentsByClass = async () => {
+      try {
+        const studentsQuery = query(
+          collection(db, 'students'),
+          where('className', '==', String(selectedClass).toUpperCase())
+        );
+        
+        // ⚡ getDocs 會自動先看快取，若快取有資料且未變更，就不會消耗 Firebase 雲端讀取額度
+        const snapshot = await getDocs(studentsQuery);
+        
+        const loaded = snapshot.docs
+          .map(doc => doc.data())
+          .filter(doc => doc.id !== "SYSTEM_CONFIG_QUESTS");
+        
+        setStudents(loaded);
+      } catch (error) {
+        console.error("Firestore 讀取學生資料失敗:", error);
+        showToast("⚠️ 無法讀取學生資料，請檢查網路。");
+      }
+    };
+
+    fetchStudentsByClass();
+  }, [dbUser, selectedClass]); // ⚡ 只有在老師真正「切換班級」時才會去讀取資料庫
 
   // 計算當前登入教師獲授權的班級列表
   const authorizedClasses = useMemo(() => {
@@ -571,14 +594,34 @@ export default function App() {
       showToast(`🎉 恭喜！${student.name} 升級至 Lv.${newLevel} ${getLvTitle(newLevel)}！`);
     }
 
+    // ⚡ 核心優化：【第一步】立即更新 React 本地狀態（介面立刻跳分，完全不Lag）
+    setStudents(prevStudents => 
+      prevStudents.map(s => 
+        (s.id === student.id && s.className === student.className) 
+          ? { ...s, xp: newXp } 
+          : s
+      )
+    );
+
+    // ⚡ 核心優化：【第二步】背景異步寫入雲端庫（老師不需在畫面上等待網路轉圈圈）
     try {
       const docRef = doc(db, 'students', `${student.className}_${student.id}`);
       await setDoc(docRef, { ...student, xp: newXp }, { merge: true });
     } catch (err) {
       console.error("XP 同步失敗:", err);
-      showToast(`❌ 更新失敗: ${err.message}`);
+      showToast(`❌ 雲端同步失敗: ${err.message}`);
+      
+      // 如果極端情況下寫入失敗，把分數扣回來（回滾機制）
+      setStudents(prevStudents => 
+        prevStudents.map(s => 
+          (s.id === student.id && s.className === student.className) 
+            ? { ...s, xp: currentXp } 
+            : s
+        )
+      );
     }
   };
+
 
   // 批量全選 / 取消全選當前班級同學
   const handleToggleSelectAll = () => {
