@@ -321,6 +321,17 @@ export default function App() {
         batch.set(docRef, { ...s, xp: newXp }, { merge: true });
       });
       await batch.commit();
+      const groupKeys = groupStudents.map(s => `${s.className}_${s.id}`);
+setStudents(prevStudents =>
+  prevStudents.map(s => {
+    const key = `${s.className}_${s.id}`;
+    if (groupKeys.includes(key)) {
+      return { ...s, xp: (Number(s.xp) || 0) + amount };
+    }
+    return s;
+  })
+);
+
       showToast(`⚡ 成功為全組 ${groupStudents.length} 位同學發放 +${amount} XP！`);
     } catch (err) {
       console.error("全組加分失敗:", err);
@@ -669,6 +680,17 @@ export default function App() {
       });
 
       await batch.commit();
+      // 💡 新增：同步更新本地 React 畫面，讓所有被勾選的同學立刻在畫面上加分
+setStudents(prevStudents => 
+  prevStudents.map(s => {
+    const key = `${s.className}_${s.id}`;
+    if (selectedStudentKeys[key]) {
+      return { ...s, xp: (Number(s.xp) || 0) + amount };
+    }
+    return s;
+  })
+);
+
       showToast(`⚡ 成功為 ${count} 位同學發放 +${amount} XP 獎勵！`);
       setSelectedStudentKeys({});
       setBatchMode(false);
